@@ -43,8 +43,9 @@ export default function PlumavitEPS() {
       try {
         const { data, error: queryError } = await supabase
           .from('pallets_eps')
-          .select('codigo_pallet, bloques_actuales, estado')
+          .select('id_pallet, codigo_pallet, bloques_actuales, estado')
           .eq('estado', 'EN_PROCESO')
+          .order('id_pallet', { ascending: false })
           .limit(1)
           .maybeSingle()
 

@@ -57,16 +57,17 @@ export default function RecepcionPatio() {
     const { data, error: queryError } = await supabase
       .from('recepciones_guia')
       .select(`
+        id_recepcion,
         numero_guia,
         cantidad_aceptada,
         cantidad_rechazada_vertedero,
         kilos_teoricos_aceptados,
         kilos_teoricos_rechazados,
-        created_at,
+        creado_en,
         proveedores ( razon_social ),
         tipos_residuo ( codigo, nombre )
       `)
-      .order('created_at', { ascending: false })
+      .order('id_recepcion', { ascending: false })
       .limit(5)
 
     if (queryError) throw queryError
@@ -103,16 +104,17 @@ export default function RecepcionPatio() {
         const { data, error: guiasError } = await supabase
           .from('recepciones_guia')
           .select(`
+            id_recepcion,
             numero_guia,
             cantidad_aceptada,
             cantidad_rechazada_vertedero,
             kilos_teoricos_aceptados,
             kilos_teoricos_rechazados,
-            created_at,
+            creado_en,
             proveedores ( razon_social ),
             tipos_residuo ( codigo, nombre )
           `)
-          .order('created_at', { ascending: false })
+          .order('id_recepcion', { ascending: false })
           .limit(5)
 
         if (guiasError) throw guiasError
@@ -169,7 +171,15 @@ export default function RecepcionPatio() {
       const { data: nuevaRecepcion, error: insertError } = await supabase
         .from('recepciones_guia')
         .insert(recepcion)
-        .select()
+        .select(`
+          id_recepcion,
+          numero_guia,
+          cantidad_aceptada,
+          cantidad_rechazada_vertedero,
+          kilos_teoricos_aceptados,
+          kilos_teoricos_rechazados,
+          creado_en
+        `)
         .single()
 
       if (insertError) throw insertError
@@ -396,7 +406,7 @@ export default function RecepcionPatio() {
           ) : (
             <ul className="divide-y divide-slate-200">
               {guias.map((guia) => (
-                <li key={`${guia.numero_guia}-${guia.created_at}`} className="py-4 first:pt-0 last:pb-0">
+                <li key={guia.id_recepcion} className="py-4 first:pt-0 last:pb-0">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="truncate font-bold">{guia.numero_guia}</p>

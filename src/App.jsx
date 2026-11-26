@@ -10,6 +10,8 @@ import {
   Truck,
 } from 'lucide-react'
 import { supabase, supabaseConfigurationError } from './lib/supabaseClient'
+import ExtrusionSilo from './pages/ExtrusionSilo'
+import MolinoScrap from './pages/MolinoScrap'
 import PlumavitEPS from './pages/PlumavitEPS'
 import RecepcionPatio from './pages/RecepcionPatio'
 
@@ -19,16 +21,6 @@ const tabs = [
   { id: 'horno', label: 'Horno / Silo', Icon: Flame },
   { id: 'plumavit', label: 'Plumavit', Icon: Boxes },
 ]
-
-function PreparacionModule({ name }) {
-  return (
-    <section className="mx-auto max-w-2xl rounded-2xl bg-white p-8 text-center shadow-sm">
-      <Cog className="mx-auto h-10 w-10 text-emerald-800" aria-hidden="true" />
-      <h1 className="mt-4 text-xl font-bold text-slate-900">{name}</h1>
-      <p className="mt-2 text-slate-600">Este módulo estará disponible próximamente.</p>
-    </section>
-  )
-}
 
 function App() {
   const [activeTab, setActiveTab] = useState('patio')
@@ -175,8 +167,8 @@ function App() {
         {tabs.map(({ id }) => visitedTabs.includes(id) && (
           <div key={id} hidden={activeTab !== id}>
             {id === 'patio' && <RecepcionPatio />}
-            {id === 'molino' && <PreparacionModule name="Molino Scrap" />}
-            {id === 'horno' && <PreparacionModule name="Horno / Silo de Extrusión" />}
+            {id === 'molino' && <MolinoScrap />}
+            {id === 'horno' && <ExtrusionSilo />}
             {id === 'plumavit' && <PlumavitEPS />}
           </div>
         ))}
