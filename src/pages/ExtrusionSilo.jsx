@@ -33,6 +33,7 @@ function getBinLabel(pesaje) {
 
 export default function ExtrusionSilo({ user }) {
   const [pendingPesajes, setPendingPesajes] = useState([])
+  const [corridasRecientes, setCorridasRecientes] = useState([])
   const [tiposResiduo, setTiposResiduo] = useState([])
   const [tipoMaterialId, setTipoMaterialId] = useState('')
   const [binsSeleccionados, setBinsSeleccionados] = useState([])
@@ -96,7 +97,7 @@ export default function ExtrusionSilo({ user }) {
 
     setLoading(true)
     try {
-      const [tiposResult, pesajesResult] = await Promise.all([
+      const [tiposResult, pesajesResult, corridasResult] = await Promise.all([
         supabase
           .from('tipos_residuo')
           .select('id_tipo_residuo, codigo, nombre')
@@ -116,13 +117,29 @@ export default function ExtrusionSilo({ user }) {
           `)
           .eq('estado_consumo', 'EN_ESPERA_HORNO')
           .order('id_pesaje', { ascending: true }),
+        supabase
+          .from('corridas_extrusion')
+          .select(`
+            id_corrida,
+            numero_vale,
+            id_tipo_residuo,
+            kilos_scrap_entrada,
+            kilos_pellet_maxisaco,
+            color_pellet,
+            porcentaje_merma,
+            tipos_residuo ( nombre )
+          `)
+          .order('id_corrida', { ascending: false })
+          .limit(5),
       ])
 
       if (tiposResult.error) throw tiposResult.error
       if (pesajesResult.error) throw pesajesResult.error
+      if (corridasResult.error) throw corridasResult.error
 
       setTiposResiduo(tiposResult.data ?? [])
       setPendingPesajes(pesajesResult.data ?? [])
+      setCorridasRecientes(corridasResult.data ?? [])
       return true
     } catch (loadError) {
       setError(`No se pudieron cargar los datos de horno: ${getErrorMessage(loadError)}`)
@@ -204,6 +221,7 @@ export default function ExtrusionSilo({ user }) {
 
     const valeDate = new Date()
     const corridaNueva = {
+      id_tipo_residuo: tipoMaterial.id_tipo_residuo,
       kilos_scrap_entrada: kilosScrapEntrada,
       kilos_pellet_maxisaco: pelletWeight,
       color_pellet: colorPellet,
@@ -778,6 +796,45 @@ export default function ExtrusionSilo({ user }) {
             )}
           </>
         )}
+
+        <section className="space-y-4 rounded-2xl bg-white p-5 shadow-sm sm:p-6">
+          <div>
+            <h2 className="text-lg font-bold">Últimas corridas de extrusión</h2>
+            <p className="mt-1 text-sm text-slate-600">El material corresponde al tipo registrado en cada corrida.</p>
+          </div>
+          {corridasRecientes.length === 0 ? (
+            <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">Aún no hay corridas registradas.</p>
+          ) : (
+            <ul className="divide-y divide-slate-200">
+              {corridasRecientes.map((corrida) => {
+                const tipo = Array.isArray(corrida.tipos_residuo)
+                  ? corrida.tipos_residuo[0]
+                  : corrida.tipos_residuo
+                const material = tipo?.nombre
+                  ?? tiposResiduo.find(
+                    (item) => String(item.id_tipo_residuo) === String(corrida.id_tipo_residuo),
+                  )?.nombre
+                  ?? 'Material no identificado'
+                return (
+                  <li key={corrida.id_corrida} className="grid gap-2 py-4 sm:grid-cols-2">
+                    <div>
+                      <p className="font-bold">{corrida.numero_vale || `Corrida ${corrida.id_corrida}`}</p>
+                      <p className="mt-1 text-sm font-semibold text-emerald-900">
+                        Tipo de Polímero: {material}
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-sm sm:text-right">
+                      <p>Scrap entrada: <strong>{formatKg(corrida.kilos_scrap_entrada)}</strong></p>
+                      <p>Maxisaco: <strong>{formatKg(corrida.kilos_pellet_maxisaco)}</strong></p>
+                      <p>Color: <strong>{corrida.color_pellet || '—'}</strong></p>
+                      <p>Merma: <strong>{numberFormat.format(Number(corrida.porcentaje_merma) || 0)}%</strong></p>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </section>
       </div>
     </main>
   )

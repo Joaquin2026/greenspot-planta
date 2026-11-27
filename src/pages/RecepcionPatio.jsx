@@ -57,6 +57,13 @@ export default function RecepcionPatio({ user }) {
   const pesoUnitario = Number(tipoSeleccionado?.peso_teorico_unidad_kg) || 0
   const kilosAceptados = cantidadAceptada * pesoUnitario
   const kilosRechazados = cantidadRechazada * pesoUnitario
+  const kilosUltimasRecepciones = guias.reduce(
+    (totals, guia) => ({
+      aceptados: totals.aceptados + (Number(guia.kilos_teoricos_aceptados) || 0),
+      rechazados: totals.rechazados + (Number(guia.kilos_teoricos_rechazados) || 0),
+    }),
+    { aceptados: 0, rechazados: 0 },
+  )
 
   async function getNextFolio() {
     const { data, error: queryError } = await supabase
@@ -113,6 +120,7 @@ export default function RecepcionPatio({ user }) {
           supabase
             .from('tipos_residuo')
             .select('id_tipo_residuo, codigo, nombre, peso_teorico_unidad_kg')
+            .neq('codigo', 'EPS-BLOQ')
             .order('nombre'),
           supabase
             .from('recepciones_guia')
@@ -266,7 +274,7 @@ export default function RecepcionPatio({ user }) {
           </div>
           <p className="mt-4 flex items-center gap-2 text-sm text-emerald-100">
             <Truck className="h-4 w-4" aria-hidden="true" />
-            Registro de ingreso de camiones
+            Registro inicial de ingreso · el acopio y seguimiento en patio se controlan en kg
           </p>
         </header>
 
@@ -368,7 +376,7 @@ export default function RecepcionPatio({ user }) {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
                   <label htmlFor="cantidad_aceptada" className="mb-2 block text-sm font-semibold">
-                    Cantidad aceptada
+                    Unidades descargadas aceptadas
                   </label>
                   <input
                     id="cantidad_aceptada"
@@ -386,7 +394,7 @@ export default function RecepcionPatio({ user }) {
                 </div>
                 <div>
                   <label htmlFor="cantidad_rechazada_vertedero" className="mb-2 block text-sm font-semibold">
-                    Rechazada a vertedero
+                    Unidades rechazadas a vertedero
                   </label>
                   <input
                     id="cantidad_rechazada_vertedero"
@@ -401,6 +409,10 @@ export default function RecepcionPatio({ user }) {
                   />
                 </div>
               </div>
+
+              <p className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-950">
+                Las unidades se usan solo como dato de descarga para calcular los kilos teóricos iniciales. El acopio en patio y todo seguimiento posterior se mide exclusivamente en kg.
+              </p>
 
               <div className="grid gap-3 rounded-xl bg-slate-50 p-4 sm:grid-cols-2">
                 <div>
@@ -435,38 +447,62 @@ export default function RecepcionPatio({ user }) {
         </section>
 
         <section className="rounded-2xl bg-white p-5 shadow-sm sm:p-6">
-          <h2 className="mb-4 text-lg font-bold">Últimas guías</h2>
+          <div className="mb-4">
+            <h2 className="text-lg font-bold">Últimas guías</h2>
+            <p className="mt-1 text-sm text-slate-600">El acopio se muestra en kilos; las unidades quedan como referencia histórica de descarga.</p>
+          </div>
           {guias.length === 0 ? (
             <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">
               Aún no hay guías registradas.
             </p>
           ) : (
-            <ul className="divide-y divide-slate-200">
-              {guias.map((guia) => (
-                <li key={guia.id_recepcion} className="py-4 first:pt-0 last:pb-0">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold uppercase text-slate-500">Folio Interno</p>
-                      <p className="truncate font-bold text-emerald-900">{guia.folio_interno}</p>
-                      <p className="mt-2 text-xs font-semibold uppercase text-slate-500">Guía Camión</p>
-                      <p className="truncate font-semibold">{guia.numero_guia}</p>
-                      <p className="mt-1 text-sm text-slate-600">
-                        {guia.proveedores?.razon_social ?? 'Proveedor'}
-                      </p>
-                      <p className="text-sm text-slate-600">
-                        {guia.tipos_residuo?.codigo} · {guia.tipos_residuo?.nombre}
-                      </p>
+            <>
+              <div className="mb-4 grid gap-3 sm:grid-cols-2">
+                <article className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                  <p className="text-sm font-bold text-emerald-900">Acopio teórico aceptado · últimas 5 guías</p>
+                  <p className="mt-1 text-2xl font-black text-emerald-950">{formatKg(kilosUltimasRecepciones.aceptados)}</p>
+                </article>
+                <article className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-sm font-bold text-slate-700">Rechazo teórico · últimas 5 guías</p>
+                  <p className="mt-1 text-2xl font-black text-slate-900">{formatKg(kilosUltimasRecepciones.rechazados)}</p>
+                </article>
+              </div>
+              <ul className="divide-y divide-slate-200">
+                {guias.map((guia) => (
+                  <li key={guia.id_recepcion} className="py-4 first:pt-0 last:pb-0">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold uppercase text-slate-500">Folio Interno</p>
+                        <p className="truncate font-bold text-emerald-900">{guia.folio_interno}</p>
+                        <p className="mt-2 text-xs font-semibold uppercase text-slate-500">Guía Camión</p>
+                        <p className="truncate font-semibold">{guia.numero_guia}</p>
+                        <p className="mt-1 text-sm text-slate-600">
+                          {guia.proveedores?.razon_social ?? 'Proveedor'}
+                        </p>
+                        <p className="text-sm text-slate-600">
+                          {guia.tipos_residuo?.codigo} · {guia.tipos_residuo?.nombre}
+                        </p>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <p className="text-xs font-semibold uppercase text-emerald-800">Acopio aceptado</p>
+                        <p className="text-xl font-black text-emerald-900">
+                          {formatKg(Number(guia.kilos_teoricos_aceptados) || 0)}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          Descarga inicial: {Number(guia.cantidad_aceptada) || 0} unidades
+                        </p>
+                        <p className="mt-2 font-semibold">
+                          Rechazados: {formatKg(Number(guia.kilos_teoricos_rechazados) || 0)}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {Number(guia.cantidad_rechazada_vertedero) || 0} unidades de descarga
+                        </p>
+                      </div>
                     </div>
-                    <div className="shrink-0 text-right">
-                      <p className="font-semibold">{formatKg(Number(guia.kilos_teoricos_aceptados) || 0)}</p>
-                      <p className="text-xs text-slate-500">aceptados</p>
-                      <p className="mt-2 font-semibold">{formatKg(Number(guia.kilos_teoricos_rechazados) || 0)}</p>
-                      <p className="text-xs text-slate-500">rechazados</p>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </section>
       </div>

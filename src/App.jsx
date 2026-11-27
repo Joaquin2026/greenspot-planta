@@ -121,7 +121,7 @@ function App() {
       )}
 
       {isManager ? (
-        <DashboardJefatura />
+        <DashboardJefatura user={user} />
       ) : (
         <>
           <nav
