@@ -27,7 +27,7 @@ function getErrorMessage(error) {
   return 'Ocurrió un error inesperado.'
 }
 
-export default function MolinoScrap() {
+export default function MolinoScrap({ user }) {
   const [bins, setBins] = useState([])
   const [tiposResiduo, setTiposResiduo] = useState([])
   const [pesajes, setPesajes] = useState([])
@@ -268,12 +268,13 @@ export default function MolinoScrap() {
         .from('logs_auditoria')
         .insert({
           tabla_afectada: 'pesajes_scrap',
+          id_registro: Number(pesajeInsertado?.id_pesaje) || 0,
           operacion: 'INSERT',
           datos_nuevos: {
             pesaje: pesajeInsertado,
             bin: binActualizado,
           },
-          usuario_nombre: 'Operario Molino',
+          usuario_nombre: user.nombre_completo,
         })
       auditError = logError
     } catch (auditRequestError) {

@@ -26,14 +26,19 @@ function formatKg(value) {
   return `${numberFormat.format(value)} kg`
 }
 
+function formatFolioInterno(id) {
+  return `REC-${String((Number(id) || 0) + 1).padStart(4, '0')}`
+}
+
 function getErrorMessage(error) {
   return error instanceof Error ? error.message : 'Ocurrió un error inesperado.'
 }
 
-export default function RecepcionPatio() {
+export default function RecepcionPatio({ user }) {
   const [proveedores, setProveedores] = useState([])
   const [tiposResiduo, setTiposResiduo] = useState([])
   const [guias, setGuias] = useState([])
+  const [nextFolio, setNextFolio] = useState('REC-0001')
   const [form, setForm] = useState(initialForm)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -53,11 +58,24 @@ export default function RecepcionPatio() {
   const kilosAceptados = cantidadAceptada * pesoUnitario
   const kilosRechazados = cantidadRechazada * pesoUnitario
 
+  async function getNextFolio() {
+    const { data, error: queryError } = await supabase
+      .from('recepciones_guia')
+      .select('id_recepcion')
+      .order('id_recepcion', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (queryError) throw queryError
+    return formatFolioInterno(data?.id_recepcion)
+  }
+
   async function loadGuias() {
     const { data, error: queryError } = await supabase
       .from('recepciones_guia')
       .select(`
         id_recepcion,
+        folio_interno,
         numero_guia,
         cantidad_aceptada,
         cantidad_rechazada_vertedero,
@@ -87,7 +105,7 @@ export default function RecepcionPatio() {
       }
 
       try {
-        const [proveedoresResult, tiposResult] = await Promise.all([
+        const [proveedoresResult, tiposResult, latestReceiptResult] = await Promise.all([
           supabase
             .from('proveedores')
             .select('id_proveedor, rut_empresa, razon_social')
@@ -96,15 +114,23 @@ export default function RecepcionPatio() {
             .from('tipos_residuo')
             .select('id_tipo_residuo, codigo, nombre, peso_teorico_unidad_kg')
             .order('nombre'),
+          supabase
+            .from('recepciones_guia')
+            .select('id_recepcion')
+            .order('id_recepcion', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
         ])
 
         if (proveedoresResult.error) throw proveedoresResult.error
         if (tiposResult.error) throw tiposResult.error
+        if (latestReceiptResult.error) throw latestReceiptResult.error
 
         const { data, error: guiasError } = await supabase
           .from('recepciones_guia')
           .select(`
             id_recepcion,
+            folio_interno,
             numero_guia,
             cantidad_aceptada,
             cantidad_rechazada_vertedero,
@@ -123,6 +149,7 @@ export default function RecepcionPatio() {
         setProveedores(proveedoresResult.data ?? [])
         setTiposResiduo(tiposResult.data ?? [])
         setGuias(data ?? [])
+        setNextFolio(formatFolioInterno(latestReceiptResult.data?.id_recepcion))
       } catch (loadError) {
         if (active) setError(`No se pudieron cargar los datos: ${getErrorMessage(loadError)}`)
       } finally {
@@ -157,22 +184,25 @@ export default function RecepcionPatio() {
 
     setSaving(true)
 
-    const recepcion = {
-      numero_guia: form.numero_guia.trim().toUpperCase(),
-      id_proveedor: form.id_proveedor,
-      id_tipo_residuo: form.id_tipo_residuo,
-      cantidad_aceptada: cantidadAceptada,
-      cantidad_rechazada_vertedero: cantidadRechazada,
-      kilos_teoricos_aceptados: kilosAceptados,
-      kilos_teoricos_rechazados: kilosRechazados,
-    }
-
     try {
+      const folioInterno = await getNextFolio()
+      const recepcion = {
+        folio_interno: folioInterno,
+        numero_guia: form.numero_guia.trim().toUpperCase(),
+        id_proveedor: form.id_proveedor,
+        id_tipo_residuo: form.id_tipo_residuo,
+        cantidad_aceptada: cantidadAceptada,
+        cantidad_rechazada_vertedero: cantidadRechazada,
+        kilos_teoricos_aceptados: kilosAceptados,
+        kilos_teoricos_rechazados: kilosRechazados,
+      }
+
       const { data: nuevaRecepcion, error: insertError } = await supabase
         .from('recepciones_guia')
         .insert(recepcion)
         .select(`
           id_recepcion,
+          folio_interno,
           numero_guia,
           cantidad_aceptada,
           cantidad_rechazada_vertedero,
@@ -183,14 +213,16 @@ export default function RecepcionPatio() {
         .single()
 
       if (insertError) throw insertError
+      setNextFolio(formatFolioInterno(nuevaRecepcion.id_recepcion))
 
       const { error: auditError } = await supabase
         .from('logs_auditoria')
         .insert({
           tabla_afectada: 'recepciones_guia',
+          id_registro: Number(nuevaRecepcion?.id_recepcion) || 0,
           operacion: 'INSERT',
           datos_nuevos: nuevaRecepcion,
-          usuario_nombre: 'Operario Patio',
+          usuario_nombre: user.nombre_completo,
         })
 
       if (auditError) {
@@ -253,7 +285,12 @@ export default function RecepcionPatio() {
         )}
 
         <section className="rounded-2xl bg-white p-5 shadow-sm sm:p-6">
-          <h2 className="mb-5 text-lg font-bold">Nueva guía</h2>
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-lg font-bold">Nueva recepción</h2>
+            <span className="rounded-full bg-emerald-100 px-3 py-2 text-sm font-bold text-emerald-900">
+              Folio Interno Automático: {nextFolio}
+            </span>
+          </div>
           {loading ? (
             <div className="flex items-center gap-3 py-8 text-slate-600" role="status">
               <LoaderCircle className="h-5 w-5 animate-spin" aria-hidden="true" />
@@ -263,7 +300,7 @@ export default function RecepcionPatio() {
             <form className="space-y-5" onSubmit={handleSubmit}>
               <div>
                 <label htmlFor="numero_guia" className="mb-2 block text-sm font-semibold">
-                  Número de guía
+                  N° Guía de Despacho del Camión (Documento SII / Transportista)
                 </label>
                 <input
                   id="numero_guia"
@@ -274,7 +311,7 @@ export default function RecepcionPatio() {
                   required
                   value={form.numero_guia}
                   onChange={updateForm}
-                  placeholder="Ej. GD-001234"
+                  placeholder="Ej: GD-84920"
                   className="min-h-12 w-full rounded-xl border border-slate-300 px-4 text-base uppercase outline-none transition focus:border-emerald-700 focus:ring-2 focus:ring-emerald-700/20"
                 />
               </div>
@@ -409,7 +446,10 @@ export default function RecepcionPatio() {
                 <li key={guia.id_recepcion} className="py-4 first:pt-0 last:pb-0">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="truncate font-bold">{guia.numero_guia}</p>
+                      <p className="text-xs font-semibold uppercase text-slate-500">Folio Interno</p>
+                      <p className="truncate font-bold text-emerald-900">{guia.folio_interno}</p>
+                      <p className="mt-2 text-xs font-semibold uppercase text-slate-500">Guía Camión</p>
+                      <p className="truncate font-semibold">{guia.numero_guia}</p>
                       <p className="mt-1 text-sm text-slate-600">
                         {guia.proveedores?.razon_social ?? 'Proveedor'}
                       </p>
@@ -419,7 +459,9 @@ export default function RecepcionPatio() {
                     </div>
                     <div className="shrink-0 text-right">
                       <p className="font-semibold">{formatKg(Number(guia.kilos_teoricos_aceptados) || 0)}</p>
-                      <p className="mt-1 text-xs text-slate-500">aceptados</p>
+                      <p className="text-xs text-slate-500">aceptados</p>
+                      <p className="mt-2 font-semibold">{formatKg(Number(guia.kilos_teoricos_rechazados) || 0)}</p>
+                      <p className="text-xs text-slate-500">rechazados</p>
                     </div>
                   </div>
                 </li>

@@ -31,22 +31,43 @@ function getBinLabel(pesaje) {
   return pesaje.bins_maestro?.codigo_qr ?? 'Bin sin código'
 }
 
-export default function ExtrusionSilo() {
+export default function ExtrusionSilo({ user }) {
   const [pendingPesajes, setPendingPesajes] = useState([])
-  const [selectedBinIds, setSelectedBinIds] = useState([])
+  const [tiposResiduo, setTiposResiduo] = useState([])
+  const [tipoMaterialId, setTipoMaterialId] = useState('')
+  const [binsSeleccionados, setBinsSeleccionados] = useState([])
   const [kilosPelletMaxisaco, setKilosPelletMaxisaco] = useState('')
-  const [colorPellet, setColorPellet] = useState('')
+  const [colorPellet, setColorPellet] = useState('Negro')
   const [causalTecnica, setCausalTecnica] = useState('')
   const [step, setStep] = useState(1)
-  const [lastVale, setLastVale] = useState(null)
+  const [ultimoValeEmitido, setUltimoValeEmitido] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
+  const tipoMaterial = useMemo(
+    () => tiposResiduo.find((tipo) => String(tipo.id_tipo_residuo) === tipoMaterialId),
+    [tipoMaterialId, tiposResiduo],
+  )
+
+  const binsCompatibles = useMemo(
+    () => pendingPesajes.filter(
+      (pesaje) => String(pesaje.id_tipo_residuo) === tipoMaterialId,
+    ),
+    [pendingPesajes, tipoMaterialId],
+  )
+
+  const binsOtroPolimero = useMemo(
+    () => pendingPesajes.filter(
+      (pesaje) => tipoMaterialId && String(pesaje.id_tipo_residuo) !== tipoMaterialId,
+    ),
+    [pendingPesajes, tipoMaterialId],
+  )
+
   const selectedPesajes = useMemo(
-    () => pendingPesajes.filter((pesaje) => selectedBinIds.includes(String(pesaje.id_bin))),
-    [pendingPesajes, selectedBinIds],
+    () => binsCompatibles.filter((pesaje) => binsSeleccionados.includes(String(pesaje.id_pesaje))),
+    [binsCompatibles, binsSeleccionados],
   )
 
   const kilosScrapEntrada = useMemo(
@@ -66,60 +87,73 @@ export default function ExtrusionSilo() {
     && pelletWeight > 0
     && pelletWeight <= kilosScrapEntrada
 
-  async function loadPendingPesajes() {
-    const { data, error: queryError } = await supabase
-      .from('pesajes_scrap')
-      .select(`
-        id_pesaje,
-        id_bin,
-        id_tipo_residuo,
-        peso_bruto_kg,
-        tara_aplicada_kg,
-        estado_consumo,
-        bins_maestro ( codigo_qr ),
-        tipos_residuo ( codigo, nombre )
-      `)
-      .eq('estado_consumo', 'EN_ESPERA_HORNO')
-      .order('id_pesaje', { ascending: true })
+  async function cargarDatos() {
+    if (!supabase) {
+      setError(supabaseConfigurationError)
+      setLoading(false)
+      return false
+    }
 
-    if (queryError) throw queryError
-    setPendingPesajes(data ?? [])
+    setLoading(true)
+    try {
+      const [tiposResult, pesajesResult] = await Promise.all([
+        supabase
+          .from('tipos_residuo')
+          .select('id_tipo_residuo, codigo, nombre')
+          .neq('codigo', 'EPS-BLOQ')
+          .order('nombre'),
+        supabase
+          .from('pesajes_scrap')
+          .select(`
+            id_pesaje,
+            id_bin,
+            id_tipo_residuo,
+            peso_bruto_kg,
+            tara_aplicada_kg,
+            estado_consumo,
+            bins_maestro ( codigo_qr ),
+            tipos_residuo ( codigo, nombre )
+          `)
+          .eq('estado_consumo', 'EN_ESPERA_HORNO')
+          .order('id_pesaje', { ascending: true }),
+      ])
+
+      if (tiposResult.error) throw tiposResult.error
+      if (pesajesResult.error) throw pesajesResult.error
+
+      setTiposResiduo(tiposResult.data ?? [])
+      setPendingPesajes(pesajesResult.data ?? [])
+      return true
+    } catch (loadError) {
+      setError(`No se pudieron cargar los datos de horno: ${getErrorMessage(loadError)}`)
+      return false
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
-    let active = true
-
-    async function loadData() {
-      if (!supabase) {
-        setError(supabaseConfigurationError)
-        setLoading(false)
-        return
-      }
-
-      setError('')
-      try {
-        await loadPendingPesajes()
-      } catch (loadError) {
-        if (active) setError(`No se pudieron cargar los bins en espera de horno: ${getErrorMessage(loadError)}`)
-      } finally {
-        if (active) setLoading(false)
-      }
+    async function initialLoad() {
+      await cargarDatos()
     }
 
-    loadData()
-
-    return () => {
-      active = false
-    }
+    initialLoad()
   }, [])
 
   function toggleBin(idBin) {
     const id = String(idBin)
-    setSelectedBinIds((current) => (
+    setBinsSeleccionados((current) => (
       current.includes(id)
         ? current.filter((selectedId) => selectedId !== id)
         : [...current, id]
     ))
+  }
+
+  function handleTipoMaterialChange(event) {
+    setTipoMaterialId(event.target.value)
+    setBinsSeleccionados([])
+    setError('')
+    setNotice('')
   }
 
   function goToStepTwo() {
@@ -147,6 +181,11 @@ export default function ExtrusionSilo() {
       setStep(1)
       return
     }
+    if (!tipoMaterial) {
+      setError('Selecciona el tipo de material de la corrida.')
+      setStep(1)
+      return
+    }
     if (!pelletWeightValid) {
       setError('Los kilos del maxisaco deben ser mayores que cero y no superar los kilos de scrap de entrada.')
       setStep(2)
@@ -163,36 +202,66 @@ export default function ExtrusionSilo() {
       return
     }
 
-    const numeroVale = `VALE-${Date.now().toString(36).toUpperCase()}`
     const valeDate = new Date()
     const corridaNueva = {
-      numero_vale: numeroVale,
       kilos_scrap_entrada: kilosScrapEntrada,
       kilos_pellet_maxisaco: pelletWeight,
       color_pellet: colorPellet,
       porcentaje_merma: porcentajeMerma,
       causal_tecnica: causalTecnica.trim() || null,
     }
-    const idsBin = selectedPesajes.map((pesaje) => pesaje.id_bin)
+    const idsPesaje = selectedPesajes.map((pesaje) => pesaje.id_pesaje)
+    const idsBin = [...new Set(selectedPesajes.map((pesaje) => pesaje.id_bin))]
+    let numeroVale = ''
     let corridaGuardada = null
-    let etapa = 'crear la corrida de extrusión'
+    let etapa = 'consultar el correlativo de corridas'
     setSaving(true)
 
     try {
-      const { data: corrida, error: corridaError } = await supabase
+      const { data: ultimaCorrida, error: lastRunError } = await supabase
         .from('corridas_extrusion')
-        .insert(corridaNueva)
-        .select()
-        .single()
+        .select('id_corrida')
+        .order('id_corrida', { ascending: false })
+        .limit(1)
+        .maybeSingle()
 
-      if (corridaError) throw corridaError
+      if (lastRunError) throw lastRunError
+
+      const siguienteCorrelativo = (Number(ultimaCorrida?.id_corrida) || 0) + 1
+      const valeBase = `VALE-${String(siguienteCorrelativo).padStart(4, '0')}`
+      let corrida
+      let duplicateError
+
+      etapa = 'crear la corrida de extrusión'
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const now = new Date()
+        const horaMinuto = `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+        const sufijoColision = `${horaMinuto}${Math.random().toString(36).slice(2, 4).toUpperCase()}`
+        numeroVale = attempt === 0 ? valeBase : `${valeBase}-${sufijoColision}`
+
+        const { data, error: corridaError } = await supabase
+          .from('corridas_extrusion')
+          .insert({ ...corridaNueva, numero_vale: numeroVale })
+          .select()
+          .single()
+
+        if (!corridaError) {
+          corrida = data
+          duplicateError = null
+          break
+        }
+        if (corridaError.code !== '23505') throw corridaError
+        duplicateError = corridaError
+      }
+
+      if (!corrida) throw duplicateError
       corridaGuardada = corrida
 
       etapa = 'actualizar los pesajes seleccionados'
       const { data: pesajesActualizados, error: pesajesError } = await supabase
         .from('pesajes_scrap')
         .update({ estado_consumo: 'EXTRUSIONADO' })
-        .in('id_bin', idsBin)
+        .in('id_pesaje', idsPesaje)
         .eq('estado_consumo', 'EN_ESPERA_HORNO')
         .select('id_bin, id_tipo_residuo, peso_bruto_kg, tara_aplicada_kg, estado_consumo')
 
@@ -223,54 +292,57 @@ export default function ExtrusionSilo() {
         .from('logs_auditoria')
         .insert({
           tabla_afectada: 'corridas_extrusion',
+          id_registro: Number(corrida?.id_corrida) || 0,
           operacion: 'INSERT',
           datos_nuevos: {
             corrida,
+            material: {
+              id_tipo_residuo: tipoMaterial.id_tipo_residuo,
+              nombre: tipoMaterial.nombre,
+            },
             pesajes: pesajesActualizados,
             bins: binsLiberados,
           },
-          usuario_nombre: 'Operario Horno / Silo',
+          usuario_nombre: user.nombre_completo,
         })
 
       if (auditError) throw auditError
 
-      setLastVale({
+      setUltimoValeEmitido({
         numeroVale,
+        material: tipoMaterial.nombre,
         color: colorPellet,
         kilosNetos: pelletWeight,
         fecha: valeDate.toLocaleString('es-CL'),
         merma: porcentajeMerma,
       })
-      setSelectedBinIds([])
+      setTipoMaterialId('')
+      setBinsSeleccionados([])
       setKilosPelletMaxisaco('')
-      setColorPellet('')
+      setColorPellet('Negro')
       setCausalTecnica('')
       setStep(1)
       setNotice(`Corrida ${numeroVale} guardada. Los bins quedaron disponibles.`)
 
-      try {
-        await loadPendingPesajes()
-      } catch (refreshError) {
-        setError(`La corrida se guardó, pero no se pudo actualizar la lista: ${getErrorMessage(refreshError)}`)
+      const dataReloaded = await cargarDatos()
+      if (!dataReloaded) {
+        setError((message) => `La corrida se guardó, pero no se pudo actualizar la lista. ${message}`)
       }
     } catch (saveError) {
       const partialStatus = corridaGuardada
         ? `El vale ${numeroVale} ya fue creado; `
         : ''
       setError(`${partialStatus}no se pudo ${etapa}: ${getErrorMessage(saveError)}`)
-      setSelectedBinIds([])
-
-      try {
-        await loadPendingPesajes()
-      } catch (refreshError) {
-        setError((message) => `${message} Además, no se pudo refrescar la lista: ${getErrorMessage(refreshError)}`)
-      }
+      setBinsSeleccionados([])
+      await cargarDatos()
     } finally {
       setSaving(false)
     }
   }
 
-  const canContinueToStepTwo = selectedPesajes.length > 0 && kilosScrapEntrada > 0
+  const canContinueToStepTwo = Boolean(tipoMaterialId)
+    && selectedPesajes.length > 0
+    && kilosScrapEntrada > 0
   const canContinueToStepThree = pelletWeightValid && Boolean(colorPellet)
   const canConfirm = canContinueToStepThree
     && (!mermaRequiereCausal || Boolean(causalTecnica.trim()))
@@ -294,7 +366,7 @@ export default function ExtrusionSilo() {
           </p>
         </header>
 
-        {lastVale && (
+        {ultimoValeEmitido && (
           <section
             aria-label="Datos para rotular maxisaco"
             className="rounded-2xl border-4 border-yellow-300 bg-yellow-100 p-5 text-slate-950 shadow-md sm:p-6"
@@ -303,25 +375,47 @@ export default function ExtrusionSilo() {
               <Tag className="h-5 w-5" aria-hidden="true" />
               Datos para rotular con plumón en el maxisaco
             </p>
-            <p className="mt-4 text-3xl font-black tracking-tight">{lastVale.numeroVale}</p>
+            <p className="mt-4 text-3xl font-black tracking-tight">{ultimoValeEmitido.numeroVale}</p>
             <dl className="mt-4 grid grid-cols-2 gap-3">
               <div className="rounded-xl bg-white/70 p-3">
+                <dt className="text-xs font-bold uppercase text-slate-600">Material</dt>
+                <dd className="mt-1 text-lg font-black">{ultimoValeEmitido.material}</dd>
+              </div>
+              <div className="rounded-xl bg-white/70 p-3">
                 <dt className="text-xs font-bold uppercase text-slate-600">Color</dt>
-                <dd className="mt-1 text-lg font-black">{lastVale.color}</dd>
+                <dd className="mt-1 text-lg font-black">{ultimoValeEmitido.color}</dd>
               </div>
               <div className="rounded-xl bg-white/70 p-3">
                 <dt className="text-xs font-bold uppercase text-slate-600">Kilos netos</dt>
-                <dd className="mt-1 text-lg font-black">{formatKg(lastVale.kilosNetos)}</dd>
+                <dd className="mt-1 text-lg font-black">{formatKg(ultimoValeEmitido.kilosNetos)}</dd>
               </div>
               <div className="rounded-xl bg-white/70 p-3">
                 <dt className="text-xs font-bold uppercase text-slate-600">Fecha</dt>
-                <dd className="mt-1 text-sm font-bold">{lastVale.fecha}</dd>
+                <dd className="mt-1 text-sm font-bold">{ultimoValeEmitido.fecha}</dd>
               </div>
               <div className="rounded-xl bg-white/70 p-3">
                 <dt className="text-xs font-bold uppercase text-slate-600">Merma térmica</dt>
-                <dd className="mt-1 text-lg font-black">{numberFormat.format(lastVale.merma)}%</dd>
+                <dd className="mt-1 text-lg font-black">{numberFormat.format(ultimoValeEmitido.merma)}%</dd>
               </div>
             </dl>
+            <button
+              type="button"
+              onClick={() => {
+                setUltimoValeEmitido(null)
+                setTipoMaterialId('')
+                setBinsSeleccionados([])
+                setKilosPelletMaxisaco('')
+                setColorPellet('Negro')
+                setCausalTecnica('')
+                setStep(1)
+                setError('')
+                setNotice('')
+              }}
+              className="mt-5 flex min-h-14 w-full items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-base font-bold text-white transition hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950"
+            >
+              <CheckCircle2 className="h-5 w-5" aria-hidden="true" />
+              Cerrar Vale / Nueva Corrida
+            </button>
           </section>
         )}
 
@@ -376,18 +470,48 @@ export default function ExtrusionSilo() {
               <section className="space-y-4 rounded-2xl bg-white p-5 shadow-sm sm:p-6">
                 <div>
                   <h2 className="text-lg font-bold">1. Bins a horno</h2>
-                  <p className="mt-1 text-sm text-slate-600">Marca los bins que entrarán a esta corrida.</p>
+                  <p className="mt-1 text-sm text-slate-600">Elige un material para evitar mezclar polímeros.</p>
+                </div>
+
+                <div>
+                  <label htmlFor="tipo_material_corrida" className="mb-2 block text-sm font-semibold">
+                    Tipo de material de la corrida
+                  </label>
+                  <select
+                    id="tipo_material_corrida"
+                    name="tipo_material_corrida"
+                    required
+                    value={tipoMaterialId}
+                    onChange={handleTipoMaterialChange}
+                    disabled={saving}
+                    className="min-h-12 w-full rounded-xl border border-slate-300 bg-white px-4 text-base outline-none focus:border-rose-800 focus:ring-2 focus:ring-rose-800/20"
+                  >
+                    <option value="">Selecciona un tipo de material</option>
+                    {tiposResiduo.map((tipo) => (
+                      <option key={tipo.id_tipo_residuo} value={tipo.id_tipo_residuo}>
+                        {tipo.codigo} · {tipo.nombre}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 {pendingPesajes.length === 0 ? (
                   <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">
                     No hay bins en espera de horno.
                   </p>
+                ) : !tipoMaterialId ? (
+                  <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">
+                    Selecciona el material para mostrar los bins compatibles.
+                  </p>
+                ) : binsCompatibles.length === 0 ? (
+                  <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">
+                    No hay bins en espera para {tipoMaterial?.nombre}.
+                  </p>
                 ) : (
                   <ul className="space-y-2">
-                    {pendingPesajes.map((pesaje) => {
-                      const id = String(pesaje.id_bin)
-                      const checked = selectedBinIds.includes(id)
+                    {binsCompatibles.map((pesaje) => {
+                      const id = String(pesaje.id_pesaje)
+                      const checked = binsSeleccionados.includes(id)
                       const netWeight = Number(pesaje.peso_bruto_kg) - Number(pesaje.tara_aplicada_kg)
                       return (
                         <li key={pesaje.id_pesaje}>
@@ -400,7 +524,7 @@ export default function ExtrusionSilo() {
                               type="checkbox"
                               checked={checked}
                               disabled={saving}
-                              onChange={() => toggleBin(pesaje.id_bin)}
+                              onChange={() => toggleBin(pesaje.id_pesaje)}
                               className="h-6 w-6 shrink-0 accent-rose-800"
                             />
                             <span className="min-w-0 flex-1">
@@ -420,11 +544,60 @@ export default function ExtrusionSilo() {
                   </ul>
                 )}
 
+                {tipoMaterialId && binsOtroPolimero.length > 0 && (
+                  <aside className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+                    <p className="font-bold text-amber-950">
+                      Bins en planta de otro polímero — bloqueados para evitar contaminación del lote
+                    </p>
+                    <ul className="mt-3 space-y-2">
+                      {binsOtroPolimero.map((pesaje) => (
+                        <li
+                          key={pesaje.id_pesaje}
+                          className="flex items-center justify-between gap-3 rounded-lg bg-white/70 p-3 text-sm text-slate-600"
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate font-semibold">{getBinLabel(pesaje)}</span>
+                            <span className="block truncate">
+                              {pesaje.tipos_residuo?.codigo} · {pesaje.tipos_residuo?.nombre}
+                            </span>
+                          </span>
+                          <span className="shrink-0 font-semibold">
+                            {formatKg(Number(pesaje.peso_bruto_kg) - Number(pesaje.tara_aplicada_kg))}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </aside>
+                )}
+
                 <div className="flex items-center justify-between rounded-xl bg-slate-100 p-4">
                   <span className="text-sm font-semibold text-slate-700">
-                    {selectedPesajes.length} bin{selectedPesajes.length === 1 ? '' : 's'} marcado{selectedPesajes.length === 1 ? '' : 's'}
+                    Acumulado neto · {selectedPesajes.length} bin{selectedPesajes.length === 1 ? '' : 's'}
                   </span>
                   <span className="text-lg font-black text-rose-900">{formatKg(kilosScrapEntrada)}</span>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 p-4">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className="font-semibold text-slate-700">Referencia maxisaco estándar</span>
+                    <span className="font-bold text-slate-900">2.500 kg</span>
+                  </div>
+                  <div
+                    role="progressbar"
+                    aria-label="Acumulado comparado con maxisaco estándar"
+                    aria-valuemin={0}
+                    aria-valuemax={2500}
+                    aria-valuenow={Math.max(0, Math.min(kilosScrapEntrada, 2500))}
+                    className="mt-3 h-3 overflow-hidden rounded-full bg-slate-200"
+                  >
+                    <div
+                      className="h-full rounded-full bg-rose-800 transition-all"
+                      style={{ width: `${Math.max(0, Math.min((kilosScrapEntrada / 2500) * 100, 100))}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 text-right text-xs text-slate-500">
+                    {numberFormat.format(Math.max(0, Math.min((kilosScrapEntrada / 2500) * 100, 100)))}% de referencia
+                  </p>
                 </div>
 
                 <button
@@ -443,7 +616,9 @@ export default function ExtrusionSilo() {
               <section className="space-y-5 rounded-2xl bg-white p-5 shadow-sm sm:p-6">
                 <div>
                   <h2 className="text-lg font-bold">2. Pesaje maxisaco bajo silo</h2>
-                  <p className="mt-1 text-sm text-slate-600">Entrada de scrap: {formatKg(kilosScrapEntrada)}</p>
+                  <p className="mt-1 text-sm text-slate-600">
+                    {tipoMaterial?.nombre} · Entrada de scrap: {formatKg(kilosScrapEntrada)}
+                  </p>
                 </div>
 
                 <div>
@@ -515,7 +690,9 @@ export default function ExtrusionSilo() {
               <section className="space-y-5 rounded-2xl bg-white p-5 shadow-sm sm:p-6">
                 <div>
                   <h2 className="text-lg font-bold">3. Merma térmica y rotulado</h2>
-                  <p className="mt-1 text-sm text-slate-600">Revisa los valores antes de confirmar la corrida.</p>
+                  <p className="mt-1 text-sm text-slate-600">
+                    {tipoMaterial?.nombre} · Revisa los valores antes de confirmar la corrida.
+                  </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
