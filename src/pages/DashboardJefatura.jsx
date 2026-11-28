@@ -10,6 +10,7 @@ import {
   LoaderCircle,
   PackageCheck,
   Plus,
+  Printer,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -17,6 +18,7 @@ import {
   Users,
   Weight,
 } from 'lucide-react'
+import { QRCodeSVG } from 'qrcode.react'
 import { supabase, supabaseConfigurationError } from '../lib/supabaseClient'
 
 const pageSize = 500
@@ -121,6 +123,7 @@ function SectionButton({ active, id, label, Icon, onClick }) {
 export default function DashboardJefatura({ user }) {
   const [historiales, setHistoriales] = useState({})
   const [bins, setBins] = useState([])
+  const [binsToPrint, setBinsToPrint] = useState(null)
   const [usuarios, setUsuarios] = useState([])
   const [tiposResiduo, setTiposResiduo] = useState([])
   const [activeSection, setActiveSection] = useState('resumen')
@@ -251,6 +254,19 @@ export default function DashboardJefatura({ user }) {
       if (channel) supabase.removeChannel(channel)
     }
   }, [loadDashboard])
+
+  useEffect(() => {
+    if (!binsToPrint) return undefined
+
+    const handleAfterPrint = () => setBinsToPrint(null)
+    window.addEventListener('afterprint', handleAfterPrint)
+    const printTimer = window.setTimeout(() => window.print(), 100)
+
+    return () => {
+      window.clearTimeout(printTimer)
+      window.removeEventListener('afterprint', handleAfterPrint)
+    }
+  }, [binsToPrint])
 
   const recepciones = historiales.recepciones_guia ?? []
   const pesajes = historiales.pesajes_scrap ?? []
@@ -492,6 +508,11 @@ export default function DashboardJefatura({ user }) {
     } finally {
       setSavingBin(false)
     }
+  }
+
+  function printBinLabels(binsToPrintNow) {
+    if (binsToPrintNow.length === 0) return
+    setBinsToPrint(binsToPrintNow)
   }
 
   async function handleCreateUser(event) {
@@ -900,6 +921,15 @@ export default function DashboardJefatura({ user }) {
                       <p className="text-sm text-slate-600">Alta de bins físicos con QR fijo.</p>
                     </div>
                   </header>
+                  <button
+                    type="button"
+                    onClick={() => printBinLabels(bins)}
+                    disabled={bins.length === 0}
+                    className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border-2 border-emerald-800 px-4 font-bold text-emerald-900 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Printer className="h-5 w-5" aria-hidden="true" />
+                    Imprimir Todos los QR
+                  </button>
                   <form onSubmit={handleCreateBin} className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
                     <label className="text-sm font-bold">
                       Código QR
@@ -940,6 +970,7 @@ export default function DashboardJefatura({ user }) {
                           <th className="px-3 py-3">Código QR</th>
                           <th className="px-3 py-3">Tara</th>
                           <th className="px-3 py-3">Estado</th>
+                          <th className="px-3 py-3">Etiqueta</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
@@ -948,10 +979,19 @@ export default function DashboardJefatura({ user }) {
                             <td className="px-3 py-3 font-bold">{bin.codigo_qr}</td>
                             <td className="px-3 py-3">{formatNumber(Number(bin.tara_kg) || 0, 2)} kg</td>
                             <td className="px-3 py-3">{bin.estado}</td>
+                            <td className="px-3 py-3">
+                              <button
+                                type="button"
+                                onClick={() => printBinLabels([bin])}
+                                className="min-h-10 whitespace-nowrap rounded-lg bg-emerald-100 px-3 text-xs font-bold text-emerald-950 hover:bg-emerald-200"
+                              >
+                                Ver / Imprimir QR
+                              </button>
+                            </td>
                           </tr>
                         ))}
                         {bins.length === 0 && (
-                          <tr><td colSpan="3" className="px-3 py-5 text-slate-600">No hay bins registrados.</td></tr>
+                          <tr><td colSpan="4" className="px-3 py-5 text-slate-600">No hay bins registrados.</td></tr>
                         )}
                       </tbody>
                     </table>
@@ -1131,6 +1171,51 @@ export default function DashboardJefatura({ user }) {
           </>
         )}
       </div>
+      <style>{`
+        .qr-print-root { display: none; }
+        @media print {
+          @page { size: A4; margin: 12mm; }
+          body * { visibility: hidden !important; }
+          .qr-print-root,
+          .qr-print-root * { visibility: visible !important; }
+          .qr-print-root {
+            display: block !important;
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            background: white;
+          }
+          .qr-print-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10mm;
+          }
+          .qr-print-card {
+            break-inside: avoid;
+            display: flex;
+            min-height: 95mm;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #cbd5e1;
+            padding: 8mm;
+            text-align: center;
+          }
+        }
+      `}</style>
+      <section className="qr-print-root" aria-label="Etiquetas QR para bins">
+        <div className="qr-print-grid">
+          {(binsToPrint ?? []).map((bin) => (
+            <article key={bin.id_bin} className="qr-print-card">
+              <QRCodeSVG value={bin.codigo_qr} size={220} level="M" includeMargin />
+              <p className="mt-4 text-4xl font-black">{bin.codigo_qr}</p>
+              <p className="mt-2 text-xl font-bold">
+                Tara: {formatNumber(Number(bin.tara_kg) || 0, 2)} kg
+              </p>
+            </article>
+          ))}
+        </div>
+      </section>
     </main>
   )
 }

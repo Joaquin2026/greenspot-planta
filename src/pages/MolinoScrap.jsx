@@ -8,6 +8,7 @@ import {
   ScanLine,
   Truck,
   Weight,
+  X,
 } from 'lucide-react'
 import { supabase, supabaseConfigurationError } from '../lib/supabaseClient'
 
@@ -120,26 +121,22 @@ export default function MolinoScrap({ user }) {
     if (!scanning) return undefined
 
     let active = true
-    let scanner
+    let html5QrCode
+    let startupPromise
+    let handled = false
 
     async function startScanner() {
       try {
-        const { Html5QrcodeScanner } = await import('html5-qrcode')
+        const { Html5Qrcode } = await import('html5-qrcode')
         if (!active) return
 
-        scanner = new Html5QrcodeScanner(
-          'molino-qr-reader',
-          {
-            fps: 10,
-            qrbox: { width: 240, height: 240 },
-            aspectRatio: 1,
-          },
-          false,
-        )
-
-        scanner.render(
+        html5QrCode = new Html5Qrcode('molino-qr-reader')
+        await html5QrCode.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 240, height: 240 } },
           (decodedText) => {
-            if (!active) return
+            if (!active || handled) return
+            handled = true
             const code = decodedText.trim().toUpperCase()
             const bin = bins.find((item) => item.codigo_qr.toUpperCase() === code)
 
@@ -153,7 +150,6 @@ export default function MolinoScrap({ user }) {
             setSelectedBinId(String(bin.id_bin))
             setNotice(`Bin ${bin.codigo_qr} seleccionado.`)
           },
-          () => {},
         )
       } catch (scannerError) {
         if (!active) return
@@ -162,13 +158,18 @@ export default function MolinoScrap({ user }) {
       }
     }
 
-    startScanner()
+    startupPromise = startScanner()
 
     return () => {
       active = false
-      if (scanner) {
-        scanner.clear().catch((scannerError) => {
+      if (html5QrCode) {
+        startupPromise.then(async () => {
+          try {
+            if (html5QrCode.isScanning) await html5QrCode.stop()
+            html5QrCode.clear()
+          } catch (scannerError) {
           console.error('No se pudo cerrar el escáner QR del molino:', scannerError)
+          }
         })
       }
     }
@@ -399,11 +400,32 @@ export default function MolinoScrap({ user }) {
               </button>
 
               {scanning && (
-                <div
-                  id="molino-qr-reader"
-                  className="overflow-hidden rounded-xl border border-slate-200"
-                  aria-label="Cámara para escanear el QR del bin"
-                />
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4">
+                  <section
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="molino-scanner-title"
+                    className="w-full max-w-md space-y-4 rounded-2xl bg-white p-4 shadow-xl"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 id="molino-scanner-title" className="font-bold">Escanear QR del Bin</h3>
+                      <button
+                        type="button"
+                        onClick={() => setScanning(false)}
+                        aria-label="Cerrar escáner QR"
+                        className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-300 text-slate-800"
+                      >
+                        <X className="h-5 w-5" aria-hidden="true" />
+                      </button>
+                    </div>
+                    <div
+                      id="molino-qr-reader"
+                      className="overflow-hidden rounded-xl border border-slate-200"
+                      aria-label="Cámara trasera para escanear el QR del bin"
+                    />
+                    <p className="text-sm text-slate-600">Apunta la cámara trasera al código del bin.</p>
+                  </section>
+                </div>
               )}
 
               <div>
