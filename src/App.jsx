@@ -19,7 +19,7 @@ import RecepcionPatio from './pages/RecepcionPatio'
 const operatorTabs = [
   { id: 'patio', label: 'Patio', Icon: Truck },
   { id: 'molino', label: 'Molino', Icon: Cog },
-  { id: 'horno', label: 'Horno / Silo', Icon: Flame },
+  { id: 'horno', label: 'Moledora / Horno / Silo', Icon: Flame },
   { id: 'plumavit', label: 'Plumavit', Icon: Boxes },
 ]
 

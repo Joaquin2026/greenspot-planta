@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertCircle,
   CheckCircle2,
   LoaderCircle,
   QrCode,
+  RefreshCw,
   Scale,
   ScanLine,
   Truck,
@@ -28,6 +29,51 @@ function getErrorMessage(error) {
   return 'Ocurrió un error inesperado.'
 }
 
+async function loadAvailableBins() {
+  const [binsResult, pendingPesajesResult] = await Promise.all([
+    supabase
+      .from('bins_maestro')
+      .select('id_bin, codigo_qr, tara_kg, estado')
+      .order('codigo_qr'),
+    supabase
+      .from('pesajes_scrap')
+      .select('id_bin')
+      .eq('estado_consumo', 'EN_ESPERA_HORNO'),
+  ])
+
+  if (binsResult.error) throw binsResult.error
+  if (pendingPesajesResult.error) throw pendingPesajesResult.error
+
+  const binsConPesajeActivo = new Set(
+    (pendingPesajesResult.data ?? []).map((pesaje) => String(pesaje.id_bin)),
+  )
+
+  return (binsResult.data ?? []).filter(
+    (bin) => bin.estado === 'DISPONIBLE' && !binsConPesajeActivo.has(String(bin.id_bin)),
+  )
+}
+
+async function loadRecentPesajes() {
+  const { data, error: queryError } = await supabase
+    .from('pesajes_scrap')
+    .select(`
+      id_pesaje,
+      id_bin,
+      id_tipo_residuo,
+      peso_bruto_kg,
+      tara_aplicada_kg,
+      estado_consumo,
+      bins_maestro ( codigo_qr ),
+      tipos_residuo ( codigo, nombre )
+    `)
+    .eq('estado_consumo', 'EN_ESPERA_HORNO')
+    .order('id_pesaje', { ascending: false })
+    .limit(5)
+
+  if (queryError) throw queryError
+  return data ?? []
+}
+
 export default function MolinoScrap({ user }) {
   const [bins, setBins] = useState([])
   const [tiposResiduo, setTiposResiduo] = useState([])
@@ -37,6 +83,7 @@ export default function MolinoScrap({ user }) {
   const [pesoBruto, setPesoBruto] = useState(EMPTY_VALUE)
   const [scanning, setScanning] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -51,71 +98,72 @@ export default function MolinoScrap({ user }) {
   const netWeight = pesoBruto === EMPTY_VALUE ? null : grossWeight - tare
   const weightIsValid = Number.isFinite(grossWeight) && grossWeight > tare
 
-  async function loadRecentPesajes() {
-    const { data, error: queryError } = await supabase
-      .from('pesajes_scrap')
-      .select(`
-        id_pesaje,
-        id_bin,
-        id_tipo_residuo,
-        peso_bruto_kg,
-        tara_aplicada_kg,
-        estado_consumo,
-        bins_maestro ( codigo_qr ),
-        tipos_residuo ( codigo, nombre )
-      `)
-      .eq('estado_consumo', 'EN_ESPERA_HORNO')
-      .order('id_pesaje', { ascending: false })
-      .limit(5)
-
-    if (queryError) throw queryError
-    setPesajes(data ?? [])
-  }
-
-  useEffect(() => {
-    let active = true
-
-    async function loadData() {
-      if (!supabase) {
-        setError(supabaseConfigurationError)
-        setLoading(false)
-        return
-      }
-
-      setError('')
-      try {
-        const [binsResult, tiposResult] = await Promise.all([
-          supabase
-            .from('bins_maestro')
-            .select('id_bin, codigo_qr, tara_kg, estado')
-            .order('codigo_qr'),
-          supabase
-            .from('tipos_residuo')
-            .select('id_tipo_residuo, codigo, nombre')
-            .neq('codigo', 'EPS-BLOQ')
-            .order('nombre'),
-        ])
-
-        if (binsResult.error) throw binsResult.error
-        if (tiposResult.error) throw tiposResult.error
-        if (!active) return
-
-        setBins(binsResult.data ?? [])
-        setTiposResiduo(tiposResult.data ?? [])
-        await loadRecentPesajes()
-      } catch (loadError) {
-        if (active) setError(`No se pudieron cargar bins y pesajes: ${getErrorMessage(loadError)}`)
-      } finally {
-        if (active) setLoading(false)
-      }
+  const cargarDatos = useCallback(async () => {
+    if (!supabase) {
+      setError(supabaseConfigurationError)
+      setLoading(false)
+      return false
     }
 
-    loadData()
+    try {
+      const [availableBins, tiposResult, latestPesajes] = await Promise.all([
+        loadAvailableBins(),
+        supabase
+          .from('tipos_residuo')
+          .select('id_tipo_residuo, codigo, nombre')
+          .neq('codigo', 'EPS-BLOQ')
+          .order('nombre'),
+        loadRecentPesajes(),
+      ])
 
-    return () => {
-      active = false
+      if (tiposResult.error) throw tiposResult.error
+
+      setBins(availableBins)
+      setSelectedBinId((current) => (
+        availableBins.some((bin) => String(bin.id_bin) === current) ? current : EMPTY_VALUE
+      ))
+      setTiposResiduo(tiposResult.data ?? [])
+      setPesajes(latestPesajes)
+      setError('')
+      return true
+    } catch (loadError) {
+      setError(`No se pudieron cargar bins y pesajes: ${getErrorMessage(loadError)}`)
+      return false
+    } finally {
+      setLoading(false)
     }
   }, [])
+
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') cargarDatos()
+    }
+
+    window.addEventListener('focus', cargarDatos)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    const channel = supabase
+      ?.channel('molino-bins-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bins_maestro' }, cargarDatos)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pesajes_scrap' }, cargarDatos)
+      .subscribe((status, subscriptionError) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setError(`No se pudo mantener la sincronización en tiempo real: ${getErrorMessage(subscriptionError)}`)
+        }
+      })
+
+    async function initialLoad() {
+      await cargarDatos()
+    }
+
+    initialLoad()
+
+    return () => {
+      window.removeEventListener('focus', cargarDatos)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      if (channel) supabase.removeChannel(channel)
+    }
+  }, [cargarDatos])
 
   useEffect(() => {
     if (!scanning) return undefined
@@ -142,7 +190,7 @@ export default function MolinoScrap({ user }) {
 
             setScanning(false)
             if (!bin) {
-              setError(`El código ${code} no está registrado en bins_maestro.`)
+              setError(`El código ${code} no corresponde a un bin disponible para pesar.`)
               return
             }
 
@@ -175,12 +223,18 @@ export default function MolinoScrap({ user }) {
     }
   }, [bins, scanning])
 
-  async function refreshPesajesAfterSave() {
+  async function refreshAfterSave() {
+    return await cargarDatos()
+      ? ''
+      : 'No se pudieron actualizar los bins disponibles y los últimos pesajes.'
+  }
+
+  async function handleRefresh() {
+    setRefreshing(true)
     try {
-      await loadRecentPesajes()
-      return ''
-    } catch (refreshError) {
-      return getErrorMessage(refreshError)
+      await cargarDatos()
+    } finally {
+      setRefreshing(false)
     }
   }
 
@@ -252,13 +306,11 @@ export default function MolinoScrap({ user }) {
       binActualizado = data
     } catch (updateError) {
       setNotice('')
+      const updateMessage = getErrorMessage(updateError)
+      const refreshError = await refreshAfterSave()
       setError(
-        `El pesaje se registró, pero no se pudo marcar el bin como CARGADO. No reutilices ${selectedBin.codigo_qr} hasta verificar su estado: ${getErrorMessage(updateError)}`,
+        `El pesaje se registró, pero no se pudo marcar el bin como CARGADO. No reutilices ${selectedBin.codigo_qr} hasta verificar su estado: ${updateMessage}${refreshError ? ` Además, falló la actualización: ${refreshError}` : ''}`,
       )
-      const refreshError = await refreshPesajesAfterSave()
-      if (refreshError) {
-        setError((message) => `${message} Además, no se pudo actualizar la lista de pesajes: ${refreshError}`)
-      }
       setSaving(false)
       return
     }
@@ -286,7 +338,7 @@ export default function MolinoScrap({ user }) {
     setSelectedTipoId(EMPTY_VALUE)
     setPesoBruto(EMPTY_VALUE)
 
-    const refreshError = await refreshPesajesAfterSave()
+    const refreshError = await refreshAfterSave()
     if (auditError) {
       setError(
         `El pesaje y el bin se guardaron, pero falló el registro de auditoría: ${getErrorMessage(auditError)}${refreshError ? ` Además, falló la actualización de la lista: ${refreshError}` : ''}`,
@@ -343,32 +395,46 @@ export default function MolinoScrap({ user }) {
           ) : (
             <form className="space-y-5" onSubmit={handleSubmit}>
               <div>
-                <label htmlFor="id_bin" className="mb-2 block text-sm font-semibold">
-                  Bin
-                </label>
-                <select
-                  id="id_bin"
-                  name="id_bin"
-                  required
-                  value={selectedBinId}
-                  onChange={(event) => {
-                    setSelectedBinId(event.target.value)
-                    setError('')
-                    setNotice('')
-                  }}
-                  className="min-h-12 w-full rounded-xl border border-slate-300 bg-white px-4 text-base outline-none focus:border-orange-700 focus:ring-2 focus:ring-orange-700/20"
-                >
-                  <option value="">Selecciona un bin</option>
-                  {bins.map((bin) => (
-                    <option
-                      key={bin.id_bin}
-                      value={bin.id_bin}
-                      disabled={bin.estado !== 'DISPONIBLE'}
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <div className="min-w-0 flex-1">
+                    <label htmlFor="id_bin" className="mb-2 block text-sm font-semibold">
+                      Bin
+                    </label>
+                    <select
+                      id="id_bin"
+                      name="id_bin"
+                      required
+                      value={selectedBinId}
+                      onChange={(event) => {
+                        setSelectedBinId(event.target.value)
+                        setError('')
+                        setNotice('')
+                      }}
+                      className="min-h-12 w-full rounded-xl border border-slate-300 bg-white px-4 text-base outline-none focus:border-orange-700 focus:ring-2 focus:ring-orange-700/20"
                     >
-                      {bin.codigo_qr} · Tara {formatKg(bin.tara_kg)} · {bin.estado}
-                    </option>
-                  ))}
-                </select>
+                      <option value="">Selecciona un bin</option>
+                      {bins.map((bin) => (
+                        <option
+                          key={bin.id_bin}
+                          value={bin.id_bin}
+                          disabled={bin.estado !== 'DISPONIBLE'}
+                        >
+                          {bin.codigo_qr} · Tara {formatKg(bin.tara_kg)} · {bin.estado}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRefresh}
+                    disabled={loading || refreshing || saving || !supabase}
+                    aria-label="Actualizar bins y últimos pesajes"
+                    className="flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-300 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
+                    Actualizar
+                  </button>
+                </div>
                 {selectedBin && (
                   <p className="mt-2 text-sm text-slate-600">
                     Tara aplicada: <strong>{formatKg(tare)}</strong>

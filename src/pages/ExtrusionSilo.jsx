@@ -77,7 +77,8 @@ export default function ExtrusionSilo({ user }) {
   const [ultimoValeEmitido, setUltimoValeEmitido] = useState(null)
   const [loading, setLoading] = useState(true)
   const [savingRun, setSavingRun] = useState(false)
-  const [savingBinId, setSavingBinId] = useState('')
+  const [cerrandoMaxisaco, setCerrandoMaxisaco] = useState(false)
+  const [procesandoBinId, setProcesandoBinId] = useState('')
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -92,6 +93,7 @@ export default function ExtrusionSilo({ user }) {
     ) ?? null,
     [corridasEnLlenado, tipoMaterialId],
   )
+  const maxisacoActivo = siloActivo
   const binsCompatibles = useMemo(
     () => pendingPesajes.filter(
       (pesaje) => String(pesaje.id_tipo_residuo) === tipoMaterialId,
@@ -176,6 +178,38 @@ export default function ExtrusionSilo({ user }) {
     }
   }, [])
 
+  const cargarBinsVolcados = useCallback(async (runId) => {
+    if (!supabase || !runId) {
+      setBinsVolcados([])
+      setBinsLoadedRunId('')
+      return true
+    }
+
+    const { data, error: queryError } = await supabase
+      .from('pesajes_scrap')
+      .select(`
+        id_pesaje,
+        id_bin,
+        peso_bruto_kg,
+        tara_aplicada_kg,
+        peso_neto_kg,
+        bins_maestro ( codigo_qr )
+      `)
+      .eq('id_corrida', runId)
+      .eq('estado_consumo', 'CONSUMIDO_EN_HORNO')
+      .order('id_pesaje', { ascending: true })
+
+    if (queryError) {
+      console.error('Error al recargar bins volcados en la corrida:', queryError)
+      setError(queryError.message)
+      return false
+    }
+
+    setBinsVolcados(data ?? [])
+    setBinsLoadedRunId(String(runId))
+    return true
+  }, [])
+
   useEffect(() => {
     async function initialLoad() {
       await cargarDatos()
@@ -184,8 +218,6 @@ export default function ExtrusionSilo({ user }) {
   }, [cargarDatos])
 
   useEffect(() => {
-    let active = true
-
     async function loadBinsInRun() {
       if (!supabase || !siloActivo) {
         setBinsVolcados([])
@@ -193,47 +225,24 @@ export default function ExtrusionSilo({ user }) {
         return
       }
 
-      const { data, error: queryError } = await supabase
-        .from('pesajes_scrap')
-        .select(`
-          id_pesaje,
-          id_bin,
-          peso_bruto_kg,
-          tara_aplicada_kg,
-          peso_neto_kg,
-          bins_maestro ( codigo_qr )
-        `)
-        .eq('id_corrida', siloActivo.id_corrida)
-        .eq('estado_consumo', 'CONSUMIDO_EN_HORNO')
-        .order('id_pesaje', { ascending: true })
-
-      if (!active) return
-      if (queryError) {
-        setError(`No se pudo consultar el listado de bins volcados: ${queryError.message}`)
-        return
-      }
-      setBinsVolcados(data ?? [])
-      setBinsLoadedRunId(String(siloActivo.id_corrida))
+      await cargarBinsVolcados(siloActivo.id_corrida)
     }
 
     loadBinsInRun()
-    return () => {
-      active = false
-    }
-  }, [siloActivo])
+  }, [cargarBinsVolcados, siloActivo])
 
-  const vaciarBin = useCallback(async (pesaje) => {
+  const handleVaciarBin = useCallback(async (pesaje) => {
     setError('')
     setNotice('')
     if (!supabase) {
       setError(supabaseConfigurationError)
       return
     }
-    if (!siloActivo) {
+    if (!maxisacoActivo) {
       setError('Inicia o selecciona un maxisaco en llenado antes de vaciar bins.')
       return
     }
-    if (String(pesaje.id_tipo_residuo) !== String(siloActivo.id_tipo_residuo)) {
+    if (String(pesaje.id_tipo_residuo) !== String(maxisacoActivo.id_tipo_residuo)) {
       setError('El bin no corresponde al polímero del maxisaco activo.')
       return
     }
@@ -242,33 +251,31 @@ export default function ExtrusionSilo({ user }) {
       return
     }
 
-    const netWeight = getNetWeight(pesaje)
+    const netWeight = Number(pesaje.peso_neto_kg || 0)
     if (netWeight <= 0) {
       setError('El bin no tiene un peso neto válido para vaciar.')
       return
     }
 
-    setSavingBinId(String(pesaje.id_pesaje))
-    let paso = 'marcar el pesaje como consumido'
+    setProcesandoBinId(String(pesaje.id_pesaje))
     try {
-      const { data: pesajeActualizado, error: pesajeError } = await supabase
+      const { data: pesajeActualizado, error: err1 } = await supabase
         .from('pesajes_scrap')
         .update({
           estado_consumo: 'CONSUMIDO_EN_HORNO',
-          id_corrida: siloActivo.id_corrida,
+          id_corrida: maxisacoActivo.id_corrida,
         })
         .eq('id_pesaje', pesaje.id_pesaje)
         .eq('estado_consumo', 'EN_ESPERA_HORNO')
         .select('id_pesaje, id_bin, id_tipo_residuo, peso_bruto_kg, tara_aplicada_kg, estado_consumo, id_corrida')
         .maybeSingle()
 
-      if (pesajeError) throw pesajeError
+      if (err1) throw err1
       if (!pesajeActualizado) {
         throw new Error('El pesaje ya fue procesado por otra estación; actualiza la lista.')
       }
 
-      paso = 'liberar el bin'
-      const { data: binLiberado, error: binError } = await supabase
+      const { data: binLiberado, error: err2 } = await supabase
         .from('bins_maestro')
         .update({ estado: 'DISPONIBLE' })
         .eq('id_bin', pesaje.id_bin)
@@ -276,25 +283,25 @@ export default function ExtrusionSilo({ user }) {
         .select('id_bin, codigo_qr, estado')
         .maybeSingle()
 
-      if (binError) throw binError
+      if (err2) throw err2
       if (!binLiberado) {
         throw new Error('El pesaje quedó consumido, pero el bin no estaba en estado CARGADO para liberarlo.')
       }
 
-      paso = 'actualizar los kilos acumulados en el maxisaco'
-      const nuevosKilosAlimentados = kilosAlimentados + netWeight
-      const accumulatedWeightUpdate = hasKilosAlimentadosColumn
-        ? { kilos_scrap_alimentados: nuevosKilosAlimentados }
-        : { kilos_scrap_entrada: nuevosKilosAlimentados }
-      const { data: corridaActualizada, error: corridaError } = await supabase
+      const nuevoTotal = Number(maxisacoActivo.kilos_scrap_alimentados || 0)
+        + Number(pesaje.peso_neto_kg || 0)
+      const { data: corridaActualizada, error: err3 } = await supabase
         .from('corridas_extrusion')
-        .update(accumulatedWeightUpdate)
-        .eq('id_corrida', siloActivo.id_corrida)
+        .update({
+          kilos_scrap_entrada: nuevoTotal,
+          kilos_scrap_alimentados: nuevoTotal,
+        })
+        .eq('id_corrida', maxisacoActivo.id_corrida)
         .eq('estado_stock', 'EN_LLENADO')
         .select('*')
         .maybeSingle()
 
-      if (corridaError) throw corridaError
+      if (err3) throw err3
       if (!corridaActualizada) {
         throw new Error('El bin se consumió y liberó, pero el maxisaco ya no está en llenado.')
       }
@@ -314,17 +321,32 @@ export default function ExtrusionSilo({ user }) {
           usuario_nombre: user.nombre_completo,
         })
 
-      if (auditError) throw new Error(`El bin se procesó, pero falló la auditoría: ${auditError.message}`)
+      if (auditError) {
+        console.error('Error al registrar auditoría del vaciado del bin:', auditError)
+        throw auditError
+      }
 
-      setNotice(`${pesaje.bins_maestro?.codigo_qr || 'Bin'} vaciado y liberado. ${formatKg(netWeight)} agregados al ${siloActivo.numero_vale}.`)
-      await cargarDatos({ silent: true })
+      setNotice(`${pesaje.bins_maestro?.codigo_qr || 'Bin'} vaciado y liberado. ${formatKg(netWeight)} agregados al ${maxisacoActivo.numero_vale}.`)
+      const dashboardReloaded = await cargarDatos({ silent: true })
+      const pouredBinsReloaded = await cargarBinsVolcados(maxisacoActivo.id_corrida)
+      if (!dashboardReloaded || !pouredBinsReloaded) {
+        setNotice('')
+      }
     } catch (saveError) {
-      setError(`No se pudo ${paso}: ${getErrorMessage(saveError)}`)
+      console.error('Error al vaciar el bin a Extrusión/Horno y liberar el envase:', saveError)
+      const message = getErrorMessage(saveError)
       await cargarDatos({ silent: true })
+      const pouredBinsReloaded = await cargarBinsVolcados(maxisacoActivo.id_corrida)
+      setError(pouredBinsReloaded ? message : `${message} No se pudo recargar la lista de bins volcados.`)
     } finally {
-      setSavingBinId('')
+      setProcesandoBinId('')
     }
-  }, [cargarDatos, hasKilosAlimentadosColumn, kilosAlimentados, siloActivo, user.nombre_completo])
+  }, [
+    cargarBinsVolcados,
+    cargarDatos,
+    maxisacoActivo,
+    user.nombre_completo,
+  ])
 
   useEffect(() => {
     if (!scanning) return undefined
@@ -355,7 +377,7 @@ export default function ExtrusionSilo({ user }) {
               setError(`El código ${code} no corresponde a un bin en espera del polímero seleccionado.`)
               return
             }
-            vaciarBin(pesaje)
+            handleVaciarBin(pesaje)
           },
         )
       } catch (scannerError) {
@@ -379,7 +401,7 @@ export default function ExtrusionSilo({ user }) {
         })
       }
     }
-  }, [binsCompatibles, scanning, vaciarBin])
+  }, [binsCompatibles, handleVaciarBin, scanning])
 
   async function iniciarMaxisaco() {
     setError('')
@@ -475,47 +497,68 @@ export default function ExtrusionSilo({ user }) {
     }
   }
 
-  async function cerrarMaxisaco(event) {
-    event.preventDefault()
+  async function cerrarMaxisaco() {
     setError('')
     setNotice('')
+    if (!maxisacoActivo) {
+      setError('No hay un maxisaco activo en llenado.')
+      return
+    }
+    if (!kilosPelletMaxisaco || Number(kilosPelletMaxisaco) <= 0) {
+      setError('Ingresa los kilos netos de pellet pesados en la báscula (mayor a 0).')
+      return
+    }
+    if (Number(maxisacoActivo.kilos_scrap_alimentados || 0) <= 0) {
+      setError('Debes vaciar al menos un bin al horno antes de cerrar el maxisaco.')
+      return
+    }
     if (!supabase) {
       setError(supabaseConfigurationError)
       return
     }
-    if (!siloActivo || !tipoMaterial) {
-      setError('No hay un maxisaco activo para el polímero seleccionado.')
+    if (!tipoMaterial) {
+      setError('No se pudo identificar el polímero del maxisaco activo.')
       return
     }
-    if (!pesoPelletValido) {
-      setError(`El peso de pellet debe ser mayor que cero y no superar los ${formatKg(kilosAlimentados)} alimentados.`)
+
+    const scrapTotal = Number(
+      maxisacoActivo.kilos_scrap_alimentados || maxisacoActivo.kilos_scrap_entrada || 0,
+    )
+    const pelletFinal = Number(kilosPelletMaxisaco)
+    const mermaKg = Number((scrapTotal - pelletFinal).toFixed(2))
+    const mermaPorcentaje = scrapTotal > 0
+      ? Number(((mermaKg / scrapTotal) * 100).toFixed(2))
+      : 0
+
+    if (pelletFinal > scrapTotal) {
+      setError(`El peso de pellet no puede superar los ${formatKg(scrapTotal)} de scrap alimentado.`)
       return
     }
-    if (mermaRequiereCausal && !causalTecnica.trim()) {
+    if (mermaPorcentaje > 8 && !causalTecnica.trim()) {
       setError('La merma supera el 8%. Ingresa la causal técnica antes de cerrar.')
       return
     }
 
-    setSavingRun(true)
+    setCerrandoMaxisaco(true)
     const closedAt = new Date()
     const updateData = {
-      kilos_scrap_entrada: kilosAlimentados,
-      kilos_pellet_maxisaco: pesoPellet,
+      kilos_scrap_entrada: scrapTotal,
+      kilos_scrap_alimentados: scrapTotal,
+      kilos_pellet_maxisaco: pelletFinal,
+      merma_kg: mermaKg,
+      merma_porcentaje: mermaPorcentaje,
+      porcentaje_merma: mermaPorcentaje,
+      porcentaje_merma_real: mermaPorcentaje,
       color_pellet: colorPellet,
-      porcentaje_merma: mermaReal,
-      porcentaje_merma_real: mermaReal,
       causal_tecnica: causalTecnica.trim() || null,
       estado_stock: 'EN_BODEGA',
-    }
-    if (hasKilosAlimentadosColumn) {
-      updateData.kilos_scrap_alimentados = kilosAlimentados
     }
 
     try {
       const { data: corridaCerrada, error: updateError } = await supabase
         .from('corridas_extrusion')
         .update(updateData)
-        .eq('id_corrida', siloActivo.id_corrida)
+        .eq('id_corrida', maxisacoActivo.id_corrida)
         .eq('estado_stock', 'EN_LLENADO')
         .select('*, tipos_residuo ( codigo, nombre )')
         .maybeSingle()
@@ -523,37 +566,51 @@ export default function ExtrusionSilo({ user }) {
       if (updateError) throw updateError
       if (!corridaCerrada) throw new Error('El maxisaco ya fue cerrado o dejó de estar en llenado.')
 
-      const { error: auditError } = await supabase
-        .from('logs_auditoria')
-        .insert({
-          tabla_afectada: 'corridas_extrusion',
-          id_registro: Number(corridaCerrada.id_corrida) || 0,
-          operacion: 'UPDATE',
-          datos_nuevos: corridaCerrada,
-          usuario_nombre: user.nombre_completo,
-        })
-
-      if (auditError) throw new Error(`El maxisaco se cerró, pero falló la auditoría: ${auditError.message}`)
-
       setUltimoValeEmitido({
         numeroVale: corridaCerrada.numero_vale,
         material: tipoMaterial.nombre,
         color: colorPellet,
-        kilosNetos: pesoPellet,
-        kilosScrap: kilosAlimentados,
+        kilosNetos: pelletFinal,
+        kilosScrap: scrapTotal,
         fecha: closedAt.toLocaleString('es-CL'),
-        merma: mermaReal,
+        merma: mermaPorcentaje,
       })
       setKilosPelletMaxisaco('')
       setColorPellet('Negro')
       setCausalTecnica('')
-      setNotice(`${corridaCerrada.numero_vale} cerrado y enviado a bodega.`)
-      await cargarDatos({ silent: true })
+
+      let auditMessage = ''
+      try {
+        const { error: auditError } = await supabase
+          .from('logs_auditoria')
+          .insert({
+            tabla_afectada: 'corridas_extrusion',
+            id_registro: Number(corridaCerrada.id_corrida) || 0,
+            operacion: 'UPDATE',
+            datos_nuevos: corridaCerrada,
+            usuario_nombre: user.nombre_completo,
+          })
+        if (auditError) auditMessage = getErrorMessage(auditError)
+      } catch (auditError) {
+        auditMessage = getErrorMessage(auditError)
+      }
+
+      const reloaded = await cargarDatos({ silent: true })
+      if (auditMessage || !reloaded) {
+        const messages = []
+        if (auditMessage) messages.push(`Maxisaco cerrado, pero falló la auditoría: ${auditMessage}`)
+        if (!reloaded) messages.push('Maxisaco cerrado, pero no se pudo recargar el estado de la estación.')
+        setError(messages.join(' '))
+      } else {
+        setNotice(`${corridaCerrada.numero_vale} cerrado y enviado a bodega.`)
+      }
     } catch (closeError) {
-      setError(`No se pudo cerrar el maxisaco: ${getErrorMessage(closeError)}`)
-      await cargarDatos({ silent: true })
+      console.error('Error al cerrar el maxisaco y enviarlo a bodega:', closeError)
+      const message = getErrorMessage(closeError)
+      const reloaded = await cargarDatos({ silent: true })
+      setError(reloaded ? message : `${message} No se pudo recargar el estado de la estación.`)
     } finally {
-      setSavingRun(false)
+      setCerrandoMaxisaco(false)
     }
   }
 
@@ -586,7 +643,7 @@ export default function ExtrusionSilo({ user }) {
             </div>
             <div>
               <p className="text-sm font-medium text-rose-100">GreenSpot · Línea de proceso</p>
-              <h1 className="text-2xl font-bold tracking-tight">Horno, Extrusión y Silo</h1>
+              <h1 className="text-2xl font-bold tracking-tight">Moledora / Horno / Silo</h1>
             </div>
           </div>
           <p className="mt-4 flex items-center gap-2 text-sm text-rose-100">
@@ -664,7 +721,7 @@ export default function ExtrusionSilo({ user }) {
           <>
             <section className="space-y-4 rounded-2xl bg-white p-5 shadow-sm sm:p-6">
               <div>
-                <h2 className="text-lg font-bold">Silo y maxisaco en curso</h2>
+                <h2 className="text-lg font-bold">Bloque 1 — Alimentación a Tolva (Extrusora / Horno)</h2>
                 <p className="mt-1 text-sm text-slate-600">
                   Selecciona el polímero para continuar un maxisaco abierto o iniciar uno nuevo.
                 </p>
@@ -680,7 +737,7 @@ export default function ExtrusionSilo({ user }) {
                   required
                   value={tipoMaterialId}
                   onChange={handleTipoMaterialChange}
-                  disabled={savingRun || Boolean(savingBinId)}
+                  disabled={savingRun || Boolean(procesandoBinId)}
                   className="min-h-12 w-full rounded-xl border border-slate-300 bg-white px-4 text-base outline-none focus:border-rose-800 focus:ring-2 focus:ring-rose-800/20"
                 >
                   <option value="">Selecciona un polímero</option>
@@ -719,7 +776,7 @@ export default function ExtrusionSilo({ user }) {
               ) : (
                 <>
                   <article className="rounded-2xl border-2 border-rose-900 bg-rose-950 p-5 text-white shadow-sm sm:p-6">
-                    <p className="text-sm font-bold uppercase tracking-wide text-rose-200">Silo / Maxisaco en curso</p>
+                    <p className="text-sm font-bold uppercase tracking-wide text-rose-200">Lote en Línea / Maxisaco en curso</p>
                     <p className="mt-2 text-3xl font-black">{siloActivo.numero_vale}</p>
                     <p className="mt-1 text-lg font-bold">{tipoMaterial?.nombre}</p>
                     <div className="mt-5 rounded-xl bg-white/10 p-4">
@@ -748,7 +805,7 @@ export default function ExtrusionSilo({ user }) {
 
                   <section className="space-y-4 rounded-xl border border-slate-200 p-4">
                     <div>
-                      <h3 className="text-lg font-bold">Alimentación continua al horno</h3>
+                      <h3 className="text-lg font-bold">Bins molidos listos para volcar a la extrusora</h3>
                       <p className="mt-1 text-sm text-slate-600">
                         Solo se muestran bins en espera del polímero {tipoMaterial?.nombre}. Cada vaciado libera el bin al instante.
                       </p>
@@ -757,7 +814,7 @@ export default function ExtrusionSilo({ user }) {
                     <button
                       type="button"
                       onClick={() => setScanning((current) => !current)}
-                      disabled={Boolean(savingBinId) || !supabase || !binsLoadedForActiveRun}
+                      disabled={Boolean(procesandoBinId) || !supabase || !binsLoadedForActiveRun}
                       className="flex min-h-14 w-full items-center justify-center gap-2 rounded-xl border-2 border-rose-900 px-5 text-base font-bold text-rose-950 hover:bg-rose-50 disabled:opacity-50"
                     >
                       <QrCode className="h-5 w-5" aria-hidden="true" />
@@ -815,14 +872,14 @@ export default function ExtrusionSilo({ user }) {
                             </div>
                             <button
                               type="button"
-                              onClick={() => vaciarBin(pesaje)}
-                              disabled={Boolean(savingBinId) || savingRun || !binsLoadedForActiveRun}
+                              onClick={() => handleVaciarBin(pesaje)}
+                              disabled={Boolean(procesandoBinId) || savingRun || !binsLoadedForActiveRun}
                               className="flex min-h-14 w-full shrink-0 items-center justify-center gap-2 rounded-xl bg-rose-900 px-4 text-sm font-black text-white hover:bg-rose-950 disabled:cursor-not-allowed disabled:bg-slate-400 sm:w-auto"
                             >
-                              {savingBinId === String(pesaje.id_pesaje)
+                              {procesandoBinId === String(pesaje.id_pesaje)
                                 ? <LoaderCircle className="h-5 w-5 animate-spin" aria-hidden="true" />
                                 : <Flame className="h-5 w-5" aria-hidden="true" />}
-                              Vaciar al Horno y Liberar Bin
+                              {procesandoBinId === String(pesaje.id_pesaje) ? 'Vaciando...' : 'Vaciar a Línea y Liberar Bin'}
                             </button>
                           </li>
                         ))}
@@ -832,15 +889,15 @@ export default function ExtrusionSilo({ user }) {
 
                   <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
                     <div>
-                      <h3 className="text-lg font-bold">Cierre y envío a bodega</h3>
+                      <h3 className="text-lg font-bold">Bloque 3 — Descarga de Silo y Cierre de Maxisaco</h3>
                       <p className="mt-1 text-sm text-slate-600">
-                        El peso de scrap se obtiene de los bins vaciados; registra el pesaje neto final del pellet.
+                        Total alimentado a la extrusora: <strong>{formatKg(kilosAlimentados)}</strong>. Registra los kilos netos de pellet descargados desde el silo.
                       </p>
                     </div>
-                    <form onSubmit={cerrarMaxisaco} className="space-y-4">
+                    <div className="space-y-4">
                       <div>
                         <label htmlFor="kilos_pellet_maxisaco" className="mb-2 block text-sm font-semibold">
-                          Kilos Netos de Pellet Pesados en Maxisaco
+                          Kilos Netos de Pellet en Maxisaco
                         </label>
                         <input
                           id="kilos_pellet_maxisaco"
@@ -849,11 +906,10 @@ export default function ExtrusionSilo({ user }) {
                           min="0"
                           max={kilosAlimentados}
                           step="any"
-                          required
                           value={kilosPelletMaxisaco}
                           onChange={(event) => setKilosPelletMaxisaco(event.target.value)}
                           placeholder="0"
-                          disabled={savingRun || Boolean(savingBinId) || kilosAlimentados <= 0}
+                          disabled={savingRun || Boolean(procesandoBinId) || kilosAlimentados <= 0}
                           className="min-h-14 w-full rounded-xl border border-slate-300 px-4 text-2xl font-bold outline-none focus:border-rose-800 focus:ring-2 focus:ring-rose-800/20 disabled:bg-slate-100"
                         />
                       </div>
@@ -866,7 +922,7 @@ export default function ExtrusionSilo({ user }) {
                           id="color_pellet"
                           value={colorPellet}
                           onChange={(event) => setColorPellet(event.target.value)}
-                          disabled={savingRun || Boolean(savingBinId)}
+                          disabled={savingRun || Boolean(procesandoBinId)}
                           className="min-h-12 w-full rounded-xl border border-slate-300 bg-white px-4 text-base outline-none focus:border-rose-800 focus:ring-2 focus:ring-rose-800/20"
                         >
                           {colors.map((color) => <option key={color} value={color}>{color}</option>)}
@@ -905,22 +961,17 @@ export default function ExtrusionSilo({ user }) {
                       )}
 
                       <button
-                        type="submit"
-                        disabled={
-                          savingRun
-                          || Boolean(savingBinId)
-                          || !binsLoadedForActiveRun
-                          || !pesoPelletValido
-                          || (mermaRequiereCausal && !causalTecnica.trim())
-                        }
+                        type="button"
+                        onClick={cerrarMaxisaco}
+                        disabled={savingRun || cerrandoMaxisaco || Boolean(procesandoBinId) || !supabase}
                         className="flex min-h-14 w-full items-center justify-center gap-2 rounded-xl bg-emerald-800 px-5 text-base font-black text-white hover:bg-emerald-900 disabled:cursor-not-allowed disabled:bg-slate-400"
                       >
-                        {savingRun
+                        {cerrandoMaxisaco
                           ? <LoaderCircle className="h-5 w-5 animate-spin" aria-hidden="true" />
                           : <Truck className="h-5 w-5" aria-hidden="true" />}
-                        Cerrar Maxisaco y Enviar a Bodega
+                        {cerrandoMaxisaco ? 'Cerrando y generando vale...' : 'Cerrar Maxisaco y Enviar a Bodega'}
                       </button>
-                    </form>
+                    </div>
                   </section>
                 </>
               )}
